@@ -1,0 +1,203 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+# Copyright Contributors to the Dailies Notes Assistant Project.
+#
+"""DNA sign-in session handling for the RV DNA package.
+
+Pure Python with no RV or Qt imports so it can be unit tested outside RV.
+"""
+
+import json
+from dataclasses import asdict, dataclass
+from typing import Callable, Optional
+from urllib.parse import urlsplit
+
+PAYLOAD_VERSION = 1
+SIGNIN_PATH = "/desktop-signin"
+AUTH_PROVIDERS = ("none", "google")
+
+URL_SETTING = "url"
+SESSION_SETTING = "session"
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+
+
+class InvalidPayloadError(ValueError):
+    """Raised when the sign-in payload from the DNA page is malformed."""
+
+
+def normalize_dna_url(url: str) -> str:
+    """Return a canonical DNA frontend URL, or raise ValueError.
+
+    A missing scheme defaults to http for local hosts and https otherwise.
+    Query strings, fragments and trailing slashes are dropped.
+    """
+    url = (url or "").strip()
+    if not url:
+        raise ValueError("Enter the DNA URL, for example https://dna.example.com")
+
+    if "://" not in url:
+        host = url.split("/", 1)[0].rsplit(":", 1)[0].lower()
+        url = ("http://" if host in _LOCAL_HOSTS else "https://") + url
+
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    if scheme not in _DEFAULT_PORTS or not parts.netloc:
+        raise ValueError(f"Not a valid http(s) URL: {url}")
+
+    return f"{scheme}://{parts.netloc.lower()}{parts.path.rstrip('/')}"
+
+
+def signin_url(dna_url: str) -> str:
+    return normalize_dna_url(dna_url) + SIGNIN_PATH
+
+
+def url_origin(url: str) -> str:
+    """Return scheme://host[:port] with default ports removed."""
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    if port is None or port == _DEFAULT_PORTS.get(scheme):
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def same_origin(a: str, b: str) -> bool:
+    return url_origin(a) == url_origin(b)
+
+
+@dataclass(frozen=True)
+class DnaSession:
+    token: str
+    email: str
+    user_id: str
+    auth_provider: str
+    api_base_url: str
+    dna_url: str
+    name: Optional[str] = None
+    picture: Optional[str] = None
+
+    @property
+    def display_name(self) -> str:
+        return self.name or self.email
+
+    def auth_headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.token}"}
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self))
+
+    @classmethod
+    def from_json(cls, data: str) -> "DnaSession":
+        return cls(**json.loads(data))
+
+
+def _require_str(obj: dict, key: str, label: str) -> str:
+    value = obj.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidPayloadError(f"Sign-in payload is missing {label}")
+    return value
+
+
+def _optional_str(obj: dict, key: str) -> Optional[str]:
+    value = obj.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def parse_auth_payload(payload_json: str, dna_url: str) -> DnaSession:
+    """Validate the JSON sent by the DNA desktop sign-in page."""
+    try:
+        payload = json.loads(payload_json)
+    except (TypeError, ValueError) as e:
+        raise InvalidPayloadError(f"Sign-in payload is not valid JSON: {e}")
+
+    if not isinstance(payload, dict):
+        raise InvalidPayloadError("Sign-in payload must be a JSON object")
+
+    if payload.get("version") != PAYLOAD_VERSION:
+        raise InvalidPayloadError(
+            f"Unsupported sign-in payload version: {payload.get('version')!r}"
+        )
+
+    user = payload.get("user")
+    if not isinstance(user, dict):
+        raise InvalidPayloadError("Sign-in payload is missing the user")
+
+    auth_provider = payload.get("authProvider")
+    if auth_provider not in AUTH_PROVIDERS:
+        raise InvalidPayloadError(f"Unknown auth provider: {auth_provider!r}")
+
+    api_base_url = _require_str(payload, "apiBaseUrl", "the API URL")
+    try:
+        api_base_url = normalize_dna_url(api_base_url)
+    except ValueError as e:
+        raise InvalidPayloadError(str(e))
+
+    email = _require_str(user, "email", "the user email")
+    return DnaSession(
+        token=_require_str(payload, "token", "the token"),
+        email=email,
+        user_id=_optional_str(user, "id") or email,
+        auth_provider=auth_provider,
+        api_base_url=api_base_url,
+        dna_url=normalize_dna_url(dna_url),
+        name=_optional_str(user, "name"),
+        picture=_optional_str(user, "picture"),
+    )
+
+
+class SessionStore:
+    """Persists the DNA URL and session through injected settings callables.
+
+    ``read(name, default)`` and ``write(name, value)`` are bound to a
+    settings group by the caller (RV's readSettings / writeSettings).
+    """
+
+    def __init__(
+        self,
+        read: Callable[[str, str], str],
+        write: Callable[[str, str], None],
+    ) -> None:
+        self._read = read
+        self._write = write
+
+    @property
+    def url(self) -> Optional[str]:
+        value = self._read(URL_SETTING, "")
+        try:
+            return normalize_dna_url(value) if value else None
+        except ValueError:
+            return None
+
+    def set_url(self, url: str) -> str:
+        """Save a new DNA URL. Signs out when the URL changes."""
+        normalized = normalize_dna_url(url)
+        if normalized != self.url:
+            self.clear_session()
+        self._write(URL_SETTING, normalized)
+        return normalized
+
+    def load_session(self) -> Optional[DnaSession]:
+        data = self._read(SESSION_SETTING, "")
+        if not data:
+            return None
+        try:
+            session = DnaSession.from_json(data)
+        except (TypeError, ValueError):
+            return None
+        if session.dna_url != self.url:
+            return None
+        return session
+
+    def save_session(self, session: DnaSession) -> None:
+        self._write(SESSION_SETTING, session.to_json())
+
+    def clear_session(self) -> None:
+        self._write(SESSION_SETTING, "")
