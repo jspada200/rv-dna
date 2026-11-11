@@ -3,20 +3,25 @@
 An RV package that connects [RV](https://github.com/AcademySoftwareFoundation/OpenRV)
 to [DNA (Dailies Notes Assistant)](https://github.com/AcademySoftwareFoundation/dna).
 
-This first version handles signing in to DNA. It adds a **DNA** menu to RV with:
+This package signs in to DNA, selects a show and playlist, and broadcasts
+in-review version changes while you scrub media in RV. It adds a **DNA** menu
+with:
 
-- **Signed in as ...** / **Not signed in**: the current status.
-- **Sign In...** / **Sign Out**: one item that changes with the status. Sign In
-  opens DNA's sign-in page in a window inside RV; the window closes once you are
-  signed in. Sign Out forgets the stored session.
+- **Signed in as ... — playlist** / **Not signed in**: the current status.
+- **Sign In...** / **Sign Out**: Sign In opens DNA's desktop sign-in page in a
+  window inside RV (auth, then show, then playlist). The window closes once the
+  selection is handed to RV. Sign Out forgets the stored session.
+- **Switch show/playlist...**: reopen the picker without signing out.
 - **Set DNA URL...**: the address of the DNA web app, for example
   `https://dna.example.com` or `http://localhost:5173` for a local stack.
+- **Debug mode**: when checked, RV shows non-blocking viewer feedback for each
+  in-review request and response (and when a sync is skipped).
 
 ## Requirements
 
 - RV or OpenRV built with Qt 6 and PySide6 (tested with RV 2026.0.1 and OpenRV 4.0.2).
-- A DNA frontend that includes the `/desktop-signin` route. Older DNA builds load
-  the normal DNA app instead and RV never receives the sign-in.
+- A DNA frontend that includes the `/desktop-signin` route and payload version 2
+  (auth plus project and playlist). Older DNA builds will fail the handoff.
 
 ## Install
 
@@ -38,18 +43,33 @@ of a support area instead, run `rvpkg -optin <path to the installed dna-<version
 1. Choose **DNA > Sign In...**. If no DNA URL is saved yet, RV asks for it first.
 2. Sign in the same way you do in the DNA web app (email, or Google when the DNA
    server uses Google sign-in).
-3. The window closes and the DNA menu shows **Signed in as ...**.
+3. Select a show, then a playlist.
+4. The window closes and the DNA menu shows **Signed in as ... — playlist**.
 
-The session is kept across RV restarts. Changing the DNA URL signs you out.
+The session (including show/playlist) is kept across RV restarts. Changing the
+DNA URL signs you out.
+
+## Version sync
+
+When the viewed source changes, RV extracts a version ID from configurable
+search paths in `version_id_paths.json` and calls DNA's playlist metadata API
+to set `in_review`. The default paths look for:
+
+1. A ShotGrid-style `File` URL containing `/file_serve/version/<id>/`
+2. A `version_id` metadata or property value
+
+If no version ID is found, or DNA rejects the change (for example the version
+is not on the selected playlist, or in-review is pinned), RV ignores the
+failure.
 
 ## How it works
 
 RV loads `<DNA URL>/desktop-signin` in an embedded Chromium view. Before the page
 loads, RV injects a small `dnaDesktopBridge` object using Qt WebChannel, and only
-for pages on the configured DNA origin. When the user signs in, the DNA page calls
-`dnaDesktopBridge.signInComplete(...)` with the token, the user, the auth provider
-and the DNA API URL, so RV only needs the web app URL. The token never appears in
-a URL.
+for pages on the configured DNA origin. When the user finishes show/playlist
+selection, the DNA page calls `dnaDesktopBridge.signInComplete(...)` with the
+token, the user, the auth provider, the DNA API URL, and the selected project
+and playlist. The token never appears in a URL.
 
 Other RV packages can read the session with:
 
@@ -60,6 +80,7 @@ session = rv_dna_mode.theMode().session()  # None when signed out
 if session:
     headers = session.auth_headers()       # {"Authorization": "Bearer ..."}
     api = session.api_base_url
+    playlist_id = session.playlist.id
 ```
 
 Settings are stored with RV's `writeSettings` under the `DNA` group: `url` (the
@@ -72,16 +93,21 @@ RV's preferences.
   sign in from an embedded browser.
 - Google access tokens expire after about an hour and are not refreshed. Sign in
   again when DNA requests start returning 401.
+- Playlist ID is chosen in the DNA UI; RV does not infer it from ShotGrid or
+  the loaded session yet.
 
 ## Development
 
 ```sh
-make test      # unit tests for rv_dna_auth.py, run with RV's bundled Python
+make test      # unit tests, run with RV's bundled Python
 make package   # build dist/dna-<version>.rvpkg only
 ```
 
 | File | Purpose |
 | --- | --- |
-| `rv_dna_mode.py` | The RV mode: DNA menu, URL prompt, sign in and out. |
+| `rv_dna_mode.py` | The RV mode: DNA menu, URL prompt, sign in, version sync. |
 | `rv_dna_signin_dialog.py` | The sign-in window: web view, injected bridge, error panel. |
 | `rv_dna_auth.py` | URL helpers, payload validation, session storage. No RV or Qt imports. |
+| `rv_dna_version_id.py` | Declarative version-ID extraction from source fields. |
+| `rv_dna_in_review.py` | HTTP helper for `PUT .../metadata` in-review updates. |
+| `version_id_paths.json` | Ordered search paths for version IDs. |

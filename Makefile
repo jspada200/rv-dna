@@ -1,6 +1,7 @@
 VERSION := $(shell sed -n 's/^version: *//p' PACKAGE)
 PKG := dist/dna-$(VERSION).rvpkg
-SOURCES := PACKAGE rv_dna_mode.py rv_dna_auth.py rv_dna_signin_dialog.py
+SOURCES := PACKAGE rv_dna_mode.py rv_dna_auth.py rv_dna_signin_dialog.py \
+	rv_dna_version_id.py rv_dna_in_review.py version_id_paths.json
 
 RV_APP ?= /Applications/RV.app
 RVPKG ?= $(RV_APP)/Contents/MacOS/rvpkg

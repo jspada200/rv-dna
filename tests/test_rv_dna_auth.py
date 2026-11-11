@@ -25,7 +25,7 @@ DNA_URL = "http://localhost:5173"
 
 def make_payload(**overrides):
     payload = {
-        "version": 1,
+        "version": 2,
         "token": "artist@studio.com",
         "user": {
             "id": "artist@studio.com",
@@ -34,6 +34,8 @@ def make_payload(**overrides):
         },
         "authProvider": "none",
         "apiBaseUrl": "http://localhost:8000",
+        "project": {"id": "1", "name": "Demo Show"},
+        "playlist": {"id": "45", "name": "Monday Dailies"},
     }
     payload.update(overrides)
     return json.dumps(payload)
@@ -126,6 +128,10 @@ class ParseAuthPayloadTest(unittest.TestCase):
         self.assertEqual(session.auth_provider, "none")
         self.assertEqual(session.api_base_url, "http://localhost:8000")
         self.assertEqual(session.dna_url, DNA_URL)
+        self.assertEqual(session.project.id, "1")
+        self.assertEqual(session.project.name, "Demo Show")
+        self.assertEqual(session.playlist.id, "45")
+        self.assertEqual(session.playlist.name, "Monday Dailies")
 
     def test_user_id_falls_back_to_email(self):
         session = make_session(user={"email": "a@b.com"})
@@ -143,7 +149,7 @@ class ParseAuthPayloadTest(unittest.TestCase):
 
     def test_rejects_wrong_version(self):
         with self.assertRaises(InvalidPayloadError):
-            make_session(version=2)
+            make_session(version=1)
 
     def test_rejects_missing_user(self):
         with self.assertRaises(InvalidPayloadError):
@@ -166,6 +172,14 @@ class ParseAuthPayloadTest(unittest.TestCase):
             make_session(apiBaseUrl="ftp://x")
         with self.assertRaises(InvalidPayloadError):
             make_session(apiBaseUrl=None)
+
+    def test_rejects_missing_project(self):
+        with self.assertRaises(InvalidPayloadError):
+            make_session(project=None)
+
+    def test_rejects_missing_playlist_id(self):
+        with self.assertRaises(InvalidPayloadError):
+            make_session(playlist={"name": "Dailies"})
 
 
 class DnaSessionTest(unittest.TestCase):

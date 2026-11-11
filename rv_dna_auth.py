@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
-PAYLOAD_VERSION = 1
+PAYLOAD_VERSION = 2
 SIGNIN_PATH = "/desktop-signin"
 AUTH_PROVIDERS = ("none", "google")
 
@@ -74,6 +74,16 @@ def same_origin(a: str, b: str) -> bool:
 
 
 @dataclass(frozen=True)
+class DnaEntityRef:
+    id: str
+    name: Optional[str] = None
+
+    @property
+    def display_name(self) -> str:
+        return self.name or self.id
+
+
+@dataclass(frozen=True)
 class DnaSession:
     token: str
     email: str
@@ -81,6 +91,8 @@ class DnaSession:
     auth_provider: str
     api_base_url: str
     dna_url: str
+    project: DnaEntityRef
+    playlist: DnaEntityRef
     name: Optional[str] = None
     picture: Optional[str] = None
 
@@ -96,7 +108,23 @@ class DnaSession:
 
     @classmethod
     def from_json(cls, data: str) -> "DnaSession":
-        return cls(**json.loads(data))
+        raw = json.loads(data)
+        project = raw.get("project")
+        playlist = raw.get("playlist")
+        if not isinstance(project, dict) or not isinstance(playlist, dict):
+            raise ValueError("session is missing project or playlist")
+        return cls(
+            token=raw["token"],
+            email=raw["email"],
+            user_id=raw["user_id"],
+            auth_provider=raw["auth_provider"],
+            api_base_url=raw["api_base_url"],
+            dna_url=raw["dna_url"],
+            project=DnaEntityRef(id=str(project["id"]), name=project.get("name")),
+            playlist=DnaEntityRef(id=str(playlist["id"]), name=playlist.get("name")),
+            name=raw.get("name"),
+            picture=raw.get("picture"),
+        )
 
 
 def _require_str(obj: dict, key: str, label: str) -> str:
@@ -109,6 +137,19 @@ def _require_str(obj: dict, key: str, label: str) -> str:
 def _optional_str(obj: dict, key: str) -> Optional[str]:
     value = obj.get(key)
     return value if isinstance(value, str) and value else None
+
+
+def _parse_entity_ref(obj: dict, key: str, label: str) -> DnaEntityRef:
+    value = obj.get(key)
+    if not isinstance(value, dict):
+        raise InvalidPayloadError(f"Sign-in payload is missing the {label}")
+    entity_id = value.get("id")
+    if entity_id is None or (isinstance(entity_id, str) and not entity_id.strip()):
+        raise InvalidPayloadError(f"Sign-in payload is missing the {label} id")
+    name = value.get("name")
+    if name is not None and not isinstance(name, str):
+        name = str(name)
+    return DnaEntityRef(id=str(entity_id), name=name or None)
 
 
 def parse_auth_payload(payload_json: str, dna_url: str) -> DnaSession:
@@ -148,6 +189,8 @@ def parse_auth_payload(payload_json: str, dna_url: str) -> DnaSession:
         auth_provider=auth_provider,
         api_base_url=api_base_url,
         dna_url=normalize_dna_url(dna_url),
+        project=_parse_entity_ref(payload, "project", "project"),
+        playlist=_parse_entity_ref(payload, "playlist", "playlist"),
         name=_optional_str(user, "name"),
         picture=_optional_str(user, "picture"),
     )
@@ -190,7 +233,7 @@ class SessionStore:
             return None
         try:
             session = DnaSession.from_json(data)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, KeyError):
             return None
         if session.dna_url != self.url:
             return None

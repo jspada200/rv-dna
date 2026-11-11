@@ -103,13 +103,13 @@ class SignInDialog(QtWidgets.QDialog):
 
     CHANGE_URL = 2
 
-    def __init__(self, dna_url, parent=None):
+    def __init__(self, dna_url, parent=None, title="Sign in to DNA"):
         super().__init__(parent)
         self.session = None
         self._dna_url = dna_url
         self._signin_url = signin_url(dna_url)
 
-        self.setWindowTitle("Sign in to DNA")
+        self.setWindowTitle(title)
         self.resize(520, 680)
         self.setStyleSheet(f"QDialog {{ background: {DNA_BACKGROUND}; }}")
 
