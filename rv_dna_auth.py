@@ -8,7 +8,7 @@ Pure Python with no RV or Qt imports so it can be unit tested outside RV.
 """
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
@@ -95,6 +95,10 @@ class DnaSession:
     playlist: DnaEntityRef
     name: Optional[str] = None
     picture: Optional[str] = None
+    # The DNA session (one or more playlists sharing in-review) that RV drives.
+    # Sent by DNA's sign-in page; older DNA builds omit it, and the package
+    # then looks up the playlist's own session (see rv_dna_in_review).
+    review_session: Optional[DnaEntityRef] = None
 
     @property
     def display_name(self) -> str:
@@ -102,6 +106,9 @@ class DnaSession:
 
     def auth_headers(self) -> dict:
         return {"Authorization": f"Bearer {self.token}"}
+
+    def with_review_session(self, review_session: Optional[DnaEntityRef]) -> "DnaSession":
+        return replace(self, review_session=review_session)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))
@@ -124,7 +131,18 @@ class DnaSession:
             playlist=DnaEntityRef(id=str(playlist["id"]), name=playlist.get("name")),
             name=raw.get("name"),
             picture=raw.get("picture"),
+            review_session=_entity_ref_or_none(raw.get("review_session")),
         )
+
+
+def _entity_ref_or_none(value) -> Optional[DnaEntityRef]:
+    if not isinstance(value, dict):
+        return None
+    entity_id = value.get("id")
+    if entity_id is None or str(entity_id).strip() == "":
+        return None
+    name = value.get("name")
+    return DnaEntityRef(id=str(entity_id), name=str(name) if name else None)
 
 
 def _require_str(obj: dict, key: str, label: str) -> str:
@@ -193,6 +211,7 @@ def parse_auth_payload(payload_json: str, dna_url: str) -> DnaSession:
         playlist=_parse_entity_ref(payload, "playlist", "playlist"),
         name=_optional_str(user, "name"),
         picture=_optional_str(user, "picture"),
+        review_session=_entity_ref_or_none(payload.get("session")),
     )
 
 

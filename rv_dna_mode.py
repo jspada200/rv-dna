@@ -4,16 +4,32 @@
 #
 """RV mode that signs in to DNA and pushes in-review version changes."""
 
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 from rv import commands, extra_commands, qtutils, rvtypes
 
-from rv_dna_auth import SessionStore
-from rv_dna_in_review import set_in_review
+from rv_dna_auth import DnaEntityRef, SessionStore
+from rv_dna_in_review import ensure_session_for_playlist, set_in_review
 from rv_dna_signin_dialog import SignInDialog
 from rv_dna_version_id import extract_version_id, load_version_id_paths
 
 SETTINGS_GROUP = "DNA"
 DEBUG_SETTING = "debug"
+
+# DNA refusals that are expected in normal use and stay quiet outside debug
+# mode: 400 version not on the playlist, 409 in-review pinned.
+EXPECTED_REFUSALS = (400, 409)
+
+# Events RV sends while media is loading or the view changes. The new source
+# is often not in the timeline yet when they fire, so each one schedules a
+# short deferred sync instead of syncing inline.
+LOAD_EVENTS = (
+    "source-group-complete",
+    "after-progressive-loading",
+    "source-media-set",
+    "after-graph-view-change",
+)
+LOAD_SYNC_DELAY_MS = 150
+LOAD_SYNC_ATTEMPTS = 10
 
 
 def _read_setting(name, default):
@@ -83,11 +99,17 @@ class DnaMode(rvtypes.MinorMode):
         self._debug = self._load_debug()
         self._last_source = None
         self._last_sent_version_id = None
+        self._last_error = None
+        self._load_sync_attempts = 0
+        self._load_sync_timer = QtCore.QTimer()
+        self._load_sync_timer.setSingleShot(True)
+        self._load_sync_timer.setInterval(LOAD_SYNC_DELAY_MS)
+        self._load_sync_timer.timeout.connect(self._run_load_sync)
         self.init(
             "dna",
             [
                 ("frame-changed", self.on_frame_changed, "DNA"),
-                ("source-group-complete", self.on_source_group_complete, "DNA"),
+                *[(name, self.on_media_loaded, "DNA") for name in LOAD_EVENTS],
             ],
             None,
             self._build_menu(),
@@ -153,6 +175,7 @@ class DnaMode(rvtypes.MinorMode):
         self._debug = self._load_debug()
         self._last_source = None
         self._last_sent_version_id = None
+        self._last_error = None
         self.setMenuStrict(self._build_menu())
 
     def toggle_debug(self, event=None):
@@ -164,6 +187,8 @@ class DnaMode(rvtypes.MinorMode):
         )
 
     def _debug_feedback(self, message, seconds=6.0):
+        # The viewer truncates long messages; the console gets them in full.
+        print(f"rv_dna: {message}", flush=True)
         extra_commands.displayFeedback(message, seconds)
 
     def sign_in(self, event=None):
@@ -224,27 +249,49 @@ class DnaMode(rvtypes.MinorMode):
             return url
 
     def on_frame_changed(self, event):
+        # reject() lets other packages (Screening Room, ...) see the event too.
+        event.reject()
         self._sync_current_source()
 
-    def on_source_group_complete(self, event):
+    def on_media_loaded(self, event):
+        """New media or a new view: sync as soon as the source is on screen."""
+        event.reject()
+        # Players reuse source node names across loads, so forget the last one.
         self._last_source = None
-        self._sync_current_source()
+        self._load_sync_attempts = LOAD_SYNC_ATTEMPTS
+        self._load_sync_timer.start()  # restarts, so a burst of events coalesces
+
+    def _run_load_sync(self):
+        if self._sync_current_source():
+            return
+        # Nothing at the current frame yet (still loading): try again shortly.
+        self._load_sync_attempts -= 1
+        if self._load_sync_attempts > 0:
+            self._load_sync_timer.start()
 
     def _sync_current_source(self):
+        """Push the on-screen version to DNA if it changed.
+
+        Returns False only when there is no source at the current frame yet,
+        so load-time callers know to retry.
+        """
         session = self._session
         if not session:
-            return
+            return True
         try:
             sources = commands.sourcesAtFrame(commands.frame())
         except Exception:
-            return
+            return False
         if not sources:
-            return
+            return False
         source = sources[0]
         if source == self._last_source:
-            return
+            return True
         self._last_source = source
+        self._push_source(session, source)
+        return True
 
+    def _push_source(self, session, source):
         properties, metadata = gather_source_fields(source)
         version_id = extract_version_id(
             properties=properties,
@@ -266,28 +313,81 @@ class DnaMode(rvtypes.MinorMode):
                 )
             return
 
-        url = f"{session.api_base_url.rstrip('/')}/playlists/{session.playlist.id}/metadata"
-        request_body = f'{{"in_review": "{version_id}"}}'
-        if self._debug:
-            self._debug_feedback(f"DNA debug request: PUT {url} {request_body}")
+        review_session_id = self._review_session_id(session)
+        if not review_session_id:
+            return
 
         result = set_in_review(
             session.api_base_url,
+            review_session_id,
             session.playlist.id,
             version_id,
             session.auth_headers(),
         )
-        if self._debug:
-            status = result.status if result.status is not None else "network error"
-            body = (result.response_body or "(empty)").replace("\n", " ")
-            if len(body) > 240:
-                body = body[:237] + "..."
-            self._debug_feedback(
-                f"DNA debug response: {status} {body}",
-                8.0,
-            )
+        self._debug_result(result)
         if result.ok:
             self._last_sent_version_id = version_id
+            self._last_error = None
+        elif result.status == 404:
+            # The DNA session was deleted. Don't fall back to another session
+            # silently; picking a playlist again stores a fresh one.
+            extra_commands.displayFeedback(
+                "DNA session not found. Choose DNA > Switch show/playlist...", 5.0
+            )
+        else:
+            self._report_failure(result)
+
+    def _review_session_id(self, session):
+        """DNA session id for in-review updates, looked up once if needed."""
+        if session.review_session:
+            return session.review_session.id
+        session_id, result = ensure_session_for_playlist(
+            session.api_base_url,
+            session.project.id,
+            session.playlist.id,
+            session.auth_headers(),
+        )
+        if not session_id:
+            self._debug_result(result)
+            self._report_failure(result)
+            return None
+        self._store_review_session(session, DnaEntityRef(id=session_id))
+        return session_id
+
+    def _store_review_session(self, session, review_session):
+        updated = session.with_review_session(review_session)
+        self._store.save_session(updated)
+        self._session = updated
+
+    def _report_failure(self, result):
+        """Tell the user a DNA request failed, once per distinct failure.
+
+        Debug mode already shows every response; expected refusals stay quiet.
+        """
+        if self._debug or result.status in EXPECTED_REFUSALS:
+            return
+        if result.status is None:
+            message = "DNA unreachable: in review is not syncing"
+        elif result.status == 401:
+            message = "DNA sign-in expired. Choose DNA > Sign In..."
+        else:
+            message = f"DNA rejected the in-review update ({result.status})"
+        if message == self._last_error:
+            return
+        self._last_error = message
+        extra_commands.displayFeedback(message, 5.0)
+
+    def _debug_result(self, result):
+        if not self._debug:
+            return
+        self._debug_feedback(
+            f"DNA debug request: {result.method} {result.url} {result.request_body}"
+        )
+        status = result.status if result.status is not None else "network error"
+        body = (result.response_body or "(empty)").replace("\n", " ")
+        if len(body) > 240:
+            body = body[:237] + "..."
+        self._debug_feedback(f"DNA debug response: {status} {body}", 8.0)
 
 
 the_mode = None

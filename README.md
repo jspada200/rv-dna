@@ -15,12 +15,14 @@ with:
 - **Set DNA URL...**: the address of the DNA web app, for example
   `https://dna.example.com` or `http://localhost:5173` for a local stack.
 - **Debug mode**: when checked, RV shows non-blocking viewer feedback for each
-  in-review request and response (and when a sync is skipped).
+  in-review request and response (and when a sync is skipped). The same
+  messages are printed in full to RV's console, prefixed `rv_dna:`.
 
 ## Requirements
 
 - RV or OpenRV built with Qt 6 and PySide6 (tested with RV 2026.0.1 and OpenRV 4.0.2).
-- A DNA frontend that includes the `/desktop-signin` route and payload version 2
+- A DNA build with sessions (in-review lives on `/sessions/{id}/in-review`), and
+  a frontend that includes the `/desktop-signin` route and payload version 2
   (auth plus project and playlist). Older DNA builds will fail the handoff.
 
 ## Install
@@ -51,16 +53,27 @@ DNA URL signs you out.
 
 ## Version sync
 
+RV syncs when the playhead moves onto a different source, and as soon as new
+media is opened or the view changes (it retries for a moment while the media is
+still loading), so a newly opened version goes in review without pressing play.
+
 When the viewed source changes, RV extracts a version ID from configurable
-search paths in `version_id_paths.json` and calls DNA's playlist metadata API
-to set `in_review`. The default paths look for:
+search paths in `version_id_paths.json` and sets it in review on the DNA
+session with `PUT /sessions/{session_id}/in-review`. The default paths look for:
 
 1. A ShotGrid-style `File` URL containing `/file_serve/version/<id>/`
 2. A `version_id` metadata or property value
 
-If no version ID is found, or DNA rejects the change (for example the version
-is not on the selected playlist, or in-review is pinned), RV ignores the
-failure.
+The DNA session comes from the sign-in page. With DNA's sessions feature on,
+that is the session picked at sign-in, which may hold several playlists. When
+the sign-in carries no session, RV asks DNA for the playlist's own session once
+(`POST /sessions/ensure-for-playlist`) and remembers it.
+
+If no version ID is found, the version is not on the selected playlist, or
+in-review is pinned, RV leaves in-review alone. Other failures show a message
+over the viewer, once until the next successful update: DNA unreachable, an
+expired sign-in (choose **DNA > Sign In...**), a deleted DNA session (choose
+**DNA > Switch show/playlist...**), or any other rejection with its status code.
 
 ## How it works
 
@@ -68,8 +81,9 @@ RV loads `<DNA URL>/desktop-signin` in an embedded Chromium view. Before the pag
 loads, RV injects a small `dnaDesktopBridge` object using Qt WebChannel, and only
 for pages on the configured DNA origin. When the user finishes show/playlist
 selection, the DNA page calls `dnaDesktopBridge.signInComplete(...)` with the
-token, the user, the auth provider, the DNA API URL, and the selected project
-and playlist. The token never appears in a URL.
+token, the user, the auth provider, the DNA API URL, the selected project
+and playlist, and the DNA session (when the page sends one). The token never
+appears in a URL.
 
 Other RV packages can read the session with:
 
@@ -81,6 +95,7 @@ if session:
     headers = session.auth_headers()       # {"Authorization": "Bearer ..."}
     api = session.api_base_url
     playlist_id = session.playlist.id
+    review_session = session.review_session  # DNA session, or None until first sync
 ```
 
 Settings are stored with RV's `writeSettings` under the `DNA` group: `url` (the
@@ -109,5 +124,5 @@ make package   # build dist/dna-<version>.rvpkg only
 | `rv_dna_signin_dialog.py` | The sign-in window: web view, injected bridge, error panel. |
 | `rv_dna_auth.py` | URL helpers, payload validation, session storage. No RV or Qt imports. |
 | `rv_dna_version_id.py` | Declarative version-ID extraction from source fields. |
-| `rv_dna_in_review.py` | HTTP helper for `PUT .../metadata` in-review updates. |
+| `rv_dna_in_review.py` | HTTP helpers for session in-review updates and session lookup. |
 | `version_id_paths.json` | Ordered search paths for version IDs. |

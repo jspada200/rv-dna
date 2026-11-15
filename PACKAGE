@@ -1,7 +1,7 @@
 package: DNA
 author: Contributors to the Dailies Notes Assistant Project
 organization: Academy Software Foundation
-version: 0.2
+version: 0.3
 requires: ''
 rv: 2024.0.0
 openrv: 2.0.0
