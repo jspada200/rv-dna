@@ -10,6 +10,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rv_dna_auth import (  # noqa: E402
+    DnaEntityRef,
     DnaSession,
     InvalidPayloadError,
     SessionStore,
@@ -197,6 +198,26 @@ class DnaSessionTest(unittest.TestCase):
     def test_json_round_trip(self):
         session = make_session()
         self.assertEqual(DnaSession.from_json(session.to_json()), session)
+
+    def test_review_session_absent_by_default(self):
+        self.assertIsNone(make_session().review_session)
+
+    def test_payload_session_is_ignored(self):
+        # DNA's sign-in page does not pick the session; RV does.
+        self.assertIsNone(make_session(session={"id": "sess-1"}).review_session)
+
+    def test_review_session_round_trip(self):
+        session = make_session().with_review_session(DnaEntityRef(id="sess-1"))
+        self.assertEqual(DnaSession.from_json(session.to_json()), session)
+
+    def test_session_saved_before_review_sessions_still_loads(self):
+        raw = json.loads(make_session().to_json())
+        raw.pop("review_session")
+        self.assertIsNone(DnaSession.from_json(json.dumps(raw)).review_session)
+
+    def test_with_review_session(self):
+        updated = make_session().with_review_session(DnaEntityRef(id="sess-2"))
+        self.assertEqual(updated.review_session.id, "sess-2")
 
 
 class SessionStoreTest(unittest.TestCase):
