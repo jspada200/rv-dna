@@ -95,9 +95,8 @@ class DnaSession:
     playlist: DnaEntityRef
     name: Optional[str] = None
     picture: Optional[str] = None
-    # The DNA session (one or more playlists sharing in-review) that RV drives.
-    # Sent by DNA's sign-in page; older DNA builds omit it, and the package
-    # then looks up the playlist's own session (see rv_dna_in_review).
+    # The DNA session RV drives, chosen in RV with DNA > Choose session...
+    # None: each playlist's own session (DNA without the sessions feature).
     review_session: Optional[DnaEntityRef] = None
 
     @property
@@ -211,7 +210,6 @@ def parse_auth_payload(payload_json: str, dna_url: str) -> DnaSession:
         playlist=_parse_entity_ref(payload, "playlist", "playlist"),
         name=_optional_str(user, "name"),
         picture=_optional_str(user, "picture"),
-        review_session=_entity_ref_or_none(payload.get("session")),
     )
 
 

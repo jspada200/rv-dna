@@ -202,17 +202,12 @@ class DnaSessionTest(unittest.TestCase):
     def test_review_session_absent_by_default(self):
         self.assertIsNone(make_session().review_session)
 
-    def test_parses_review_session_from_payload(self):
-        session = make_session(session={"id": "sess-1", "name": "Monday review"})
-        self.assertEqual(session.review_session.id, "sess-1")
-        self.assertEqual(session.review_session.name, "Monday review")
-
-    def test_ignores_malformed_review_session(self):
-        self.assertIsNone(make_session(session={"name": "no id"}).review_session)
-        self.assertIsNone(make_session(session="sess-1").review_session)
+    def test_payload_session_is_ignored(self):
+        # DNA's sign-in page does not pick the session; RV does.
+        self.assertIsNone(make_session(session={"id": "sess-1"}).review_session)
 
     def test_review_session_round_trip(self):
-        session = make_session(session={"id": "sess-1"})
+        session = make_session().with_review_session(DnaEntityRef(id="sess-1"))
         self.assertEqual(DnaSession.from_json(session.to_json()), session)
 
     def test_session_saved_before_review_sessions_still_loads(self):
